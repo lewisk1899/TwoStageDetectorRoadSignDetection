@@ -176,13 +176,13 @@ def undersample(training_data, train_target):
 def create_road_model():
     cnn_road = keras.Sequential(
         [
-            layers.Conv2D(16, (12, 12), input_shape=(100, 100, 1), activation='relu', kernel_initializer='he_uniform'),
+            layers.Conv2D(16, (12, 12), input_shape=(100, 100, 1), activation='relu', kernel_initializer='he_uniform', kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
             layers.MaxPooling2D((4, 4)),
-            layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_uniform'),
+            layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_uniform', kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
             layers.MaxPooling2D((2, 2)),
             layers.Flatten(),
-            layers.Dense(100, activation='relu', kernel_initializer='he_uniform'),
-            layers.Dense(4, activation='softmax')  # there needs to be 4 outputs that indicate what type of sign we
+            layers.Dense(400, activation='relu', kernel_initializer='he_uniform', activity_regularizer=tf.keras.regularizers.L1(0.01), bias_regularizer=tf.keras.regularizers.L2(0.01)),
+            layers.Dense(4, activation='softmax', activity_regularizer=tf.keras.regularizers.L1(0.01))  # there needs to be 4 outputs that indicate what type of sign we
         ]
     )
     return cnn_road
@@ -190,15 +190,17 @@ def create_road_model():
 
 def cnn_road_model():
     # we will under sample the data to get a better representation of the classes in the training dataset
-
     training_data, train_target, val_data, val_target = get_training_images('data/train.csv')
-    undersampled_training, train_target = undersample(training_data, train_target)
+    undersampled_training, train_target = oversample_data(training_data, train_target) # undersample training data
     undersampled_training = undersampled_training.reshape(undersampled_training.shape[0], 100, 100, 1)
     # over_sampled_training, oversampled_target = oversample_data(training_data, train_target)
     # over_sampled_training = over_sampled_training.reshape(over_sampled_training.shape[0], 100, 100, 1)
     # train_target = tf.keras.utils.to_categorical(oversampled_target)
     # training_data = training_data.reshape(training_data.shape[0], 100, 100, 1)
     train_target = tf.keras.utils.to_categorical(train_target)
+    val_data_oversampled, val_target_oversampled = oversample_data(val_data, val_target) # oversample validation data
+    val_data_oversampled = val_data_oversampled.reshape(val_data_oversampled.shape[0], 100, 100, 1)
+    val_target_oversampled = tf.keras.utils.to_categorical(val_target_oversampled)
     val_data = val_data.reshape(val_data.shape[0], 100, 100, 1)
     val_target = tf.keras.utils.to_categorical(val_target)
 
@@ -207,8 +209,8 @@ def cnn_road_model():
     print(undersampled_training.shape)
     print(train_target)
     print("Training Data:")
-    print(len(val_data))
-    print(len(val_target))
+    print(len(val_data_oversampled))
+    print(len(val_target_oversampled))
 
     # Create a callback that saves the model's weights
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -230,7 +232,7 @@ def cnn_road_model():
     cnn_road.summary()
 
     cnn_road.compile(
-        optimizer=keras.optimizers.SGD(learning_rate=0.0001),
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
         loss=keras.losses.CategoricalCrossentropy(),
         metrics=[metrics.Precision(name='precision'), metrics.BinaryAccuracy(name='accuracy')]
     )
@@ -243,27 +245,29 @@ def cnn_road_model():
         # We pass some validation for
         # monitoring validation loss and metrics
         # at the end of each epoch
-        validation_data=(val_data, val_target),
+        validation_data=(val_data_oversampled, val_target_oversampled),
         callbacks=[early_stopping, model_checkpoint_callback]
     )
     # get training images and validation images
 
 
-# cnn_road_model()
+#cnn_road_model()
 
 def localization_and_classification():
     cnn_road = create_road_model()
     cnn_road.load_weights('my_model_weights.h5')  # for the best weights
     localized_signs = heuristic_localization(
-        'data/train_images/road797.png')  # in the form of imgs must convert to np array
+        'data/test_images/road193.png')  # in the form of imgs must convert to np array
     pred_list = []
     if localized_signs != 0:
         for point in localized_signs:
             pred_list.append(point[2].reshape(100, 100, 1))
     pred_list = np.array(pred_list)
-    predictions = cnn_road.predict(np.array(pred_list))
+    predictions = cnn_road.predict(np.array(pred_list)) # make predictions
+    # do nothing if there are no signs
     if localized_signs != 0:
         pred_indexer = 0
+        # do some processing so we can achieve the bounding boxes
         for point in localized_signs:
             coord_1 = point[0]
             coord_2 = point[1]
@@ -298,36 +302,56 @@ def heuristic_localization(file_path):
     blurred_image = cv2.GaussianBlur(grey_image, (5, 5), 1)  # slightly blur image
     img_canny = cv2.Canny(blurred_image, threshold1=125,
                           threshold2=180)  # does not matter what the thresholds are as the image has been binarized
-    # cv2.imshow("test", img_canny)
-    # cv2.waitKey(0)
+    cv2.imshow("test", img_canny)
+    cv2.waitKey(0)
 
     contours, _ = cv2.findContours(img_canny, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     circle_list = []
+    square_list = []
     # localize the speed signs or stop signs
     num_of_contours = len(contours)  # debugging purposes
     localized_cropped_images = []
-    for contour in contours:
-        approx = cv2.approxPolyDP(contour, 0.01 * cv2.arcLength(contour, True), True)
-        area = cv2.contourArea(contour)
-        # if something seems like a circle append it
-        # chosen through trial and error and comparing to the extreme cases
-        i = 0
-        if len(approx) > 11 and len(approx) < 14 and area > 250:
-            circle_list.append(contour)
-            x, y, w, h = cv2.boundingRect(contour)
-            x_1, y_1, x_2, y_2 = int(x - w / 5), int(y - h / 5), int(x + w + w / 5), int(y + h + h / 5)
-            im = cv2.resize(grey_image[y:y + w, x:x + w], (100, 100))
-            # cv2.imshow('test', im)
-            # cv2.waitKey(0)
-            localized_cropped_images.append([(x_1, y_1), (x_2, y_2), im, rgb_image])
-            cv2.rectangle(rgb_image, (x_1, y_1), (x_2, y_2), (0, 255, 0), 2)
-            i += 1
-    # #cv2.drawContours(rgb_image, circle_list, -1, (255, 0, 0), 2)
-    # cv2.imshow('Objects Detected', rgb_image)
-    # cv2.waitKey(0)
+    z = 0
+    while z <= 1:
+        for contour in contours:
+            if z == 0:
+                approx = cv2.approxPolyDP(contour, .01 * cv2.arcLength(contour, True), True)
+            else:
+                approx = cv2.approxPolyDP(contour, .02 * cv2.arcLength(contour, True), True)
+            area = cv2.contourArea(contour)
+            # if something seems like a circle append it
+            # chosen through trial and error and comparing to the extreme cases
+            i = 0
+
+            # squares
+            if len(approx) == 4 and area > 100:
+                square_list.append(contour)
+                x, y, w, h = cv2.boundingRect(contour)
+                x_1, y_1, x_2, y_2 = int(x - w / 5), int(y - h / 5), int(x + w + w / 5), int(y + h + h / 5)
+                im = cv2.resize(grey_image[y:y + w, x:x + w], (100, 100))
+                cv2.imshow('test', im)
+                cv2.waitKey(0)
+                localized_cropped_images.append([(x_1, y_1), (x_2, y_2), im, rgb_image])
+                cv2.rectangle(rgb_image, (x_1, y_1), (x_2, y_2), (0, 255, 0), 2)
+            # approach for circles
+            if len(approx) > 11 and len(approx) < 14 and area > 250:
+                circle_list.append(contour)
+                x, y, w, h = cv2.boundingRect(contour)
+                x_1, y_1, x_2, y_2 = int(x - w / 5), int(y - h / 5), int(x + w + w / 5), int(y + h + h / 5)
+                im = cv2.resize(grey_image[y:y + w, x:x + w], (100, 100))
+                cv2.imshow('test', im)
+                cv2.waitKey(0)
+                localized_cropped_images.append([(x_1, y_1), (x_2, y_2), im, rgb_image])
+                cv2.rectangle(rgb_image, (x_1, y_1), (x_2, y_2), (0, 255, 0), 2)
+        cv2.drawContours(rgb_image, square_list, -1, (255, 0, 0), 2)
+        cv2.drawContours(rgb_image, circle_list, -1, (255, 0, 0), 2)
+        z += 1
+    cv2.imshow('Objects Detected', rgb_image)
+    cv2.waitKey(0)
     return localized_cropped_images
 
-
+#heuristic_localization('data/test_images/road193.png')
+#heuristic_localization('data/train_images/road398.png')
 def bounding_box_given_with_label(image, coordinate_tuple_1, coordinate_tuple_2, label):
     # given a bounding box predicted by the net, the box will be drawn on the corresponding,
     # images where they can be visually checked for accuracy
@@ -359,7 +383,6 @@ def bounding_box(image_path_name, coordinate_tuple_1, coordinate_tuple_2):
     boxed_image = cv2.rectangle(image, fixed_tuple_coord_1, fixed_tuple_coord_2, color=color, thickness=1)
     cv2.imshow(image_path_name, boxed_image)  # show the image with the bounding box over the sign
     cv2.waitKey(0)  # wait for key press to be dismissed
-
 
 # bounding_box('data/train_images/road875.png', (186,74), (195,91))
 
