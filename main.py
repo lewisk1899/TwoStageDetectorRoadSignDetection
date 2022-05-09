@@ -1,19 +1,20 @@
-import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from keras import layers
-from keras import metrics
-from PIL import Image
-from PIL import ImageOps
-import cv2
+import math
 import os
 import shutil
-import math
-import h5py
-
-from keras import backend
-
-import glob
+import sklearn
+from sklearn.utils import class_weight
+import cv2
+import keras_tuner
+import numpy as np
+import tensorflow as tf
+import keras_tuner as kt
+import keras_preprocessing as kp
+from PIL import Image
+from PIL import ImageOps
+from keras import layers
+from keras import metrics
+from tensorflow import keras
+from keras_tuner import RandomSearch
 
 
 # parse image by image
@@ -173,48 +174,27 @@ def undersample(training_data, train_target):
     return np.array(balanced_data_set), np.array(balanced_target_set)
 
 
-def create_road_model():
+def create_road_model(hypothesis):
     cnn_road = keras.Sequential(
         [
-            layers.Conv2D(16, (12, 12), input_shape=(100, 100, 1), activation='relu', kernel_initializer='he_uniform', kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
+            layers.Conv2D(16, (12, 12), input_shape=(100, 100, 1), activation='relu', kernel_initializer='he_uniform',
+                          kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
             layers.MaxPooling2D((4, 4)),
-            layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_uniform', kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
+            layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_uniform',
+                          kernel_regularizer=tf.keras.regularizers.l1_l2(l1=0.01, l2=0.01)),
             layers.MaxPooling2D((2, 2)),
             layers.Flatten(),
-            layers.Dense(400, activation='relu', kernel_initializer='he_uniform', activity_regularizer=tf.keras.regularizers.L1(0.01), bias_regularizer=tf.keras.regularizers.L2(0.01)),
-            layers.Dense(4, activation='softmax', activity_regularizer=tf.keras.regularizers.L1(0.01))  # there needs to be 4 outputs that indicate what type of sign we
+            layers.Dense(units=hypothesis.Int('units', min_value=100, max_value=400, step=50), activation='relu',
+                         kernel_initializer='he_uniform', activity_regularizer=tf.keras.regularizers.L1(0.01),
+                         bias_regularizer=tf.keras.regularizers.L2(0.01)),
+            layers.Dense(4, activation='softmax', activity_regularizer=tf.keras.regularizers.L1(0.01))
+            # there needs to be 4 outputs that indicate what type of sign we
         ]
     )
-    return cnn_road
-
-
-def cnn_road_model():
-    # we will under sample the data to get a better representation of the classes in the training dataset
-    training_data, train_target, val_data, val_target = get_training_images('data/train.csv')
-    undersampled_training, train_target = oversample_data(training_data, train_target) # undersample training data
-    undersampled_training = undersampled_training.reshape(undersampled_training.shape[0], 100, 100, 1)
-    # over_sampled_training, oversampled_target = oversample_data(training_data, train_target)
-    # over_sampled_training = over_sampled_training.reshape(over_sampled_training.shape[0], 100, 100, 1)
-    # train_target = tf.keras.utils.to_categorical(oversampled_target)
-    # training_data = training_data.reshape(training_data.shape[0], 100, 100, 1)
-    train_target = tf.keras.utils.to_categorical(train_target)
-    val_data_oversampled, val_target_oversampled = oversample_data(val_data, val_target) # oversample validation data
-    val_data_oversampled = val_data_oversampled.reshape(val_data_oversampled.shape[0], 100, 100, 1)
-    val_target_oversampled = tf.keras.utils.to_categorical(val_target_oversampled)
-    val_data = val_data.reshape(val_data.shape[0], 100, 100, 1)
-    val_target = tf.keras.utils.to_categorical(val_target)
-
-    print("The amount of elements in x and the target should be exactly the same")
-    print("Training Data:")
-    print(undersampled_training.shape)
-    print(train_target)
-    print("Training Data:")
-    print(len(val_data_oversampled))
-    print(len(val_target_oversampled))
 
     # Create a callback that saves the model's weights
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath='my_model_weights.h5',
+        filepath='my_model_weights_2.h5',
         save_weights_only=True,
         monitor='val_precision',
         mode='max',
@@ -227,31 +207,72 @@ def cnn_road_model():
         mode='max',
         restore_best_weights=True)
 
-    # convolutional model
-    cnn_road = create_road_model()
-    cnn_road.summary()
-
     cnn_road.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        optimizer=keras.optimizers.Adam(hypothesis.Choice('learning_rate', values=[1e-2, 1e-4])),
         loss=keras.losses.CategoricalCrossentropy(),
         metrics=[metrics.Precision(name='precision'), metrics.BinaryAccuracy(name='accuracy')]
     )
+    cnn_road.summary()
 
-    history = cnn_road.fit(
-        undersampled_training,
-        train_target,
-        batch_size=20,
-        epochs=100,
-        # We pass some validation for
-        # monitoring validation loss and metrics
-        # at the end of each epoch
-        validation_data=(val_data_oversampled, val_target_oversampled),
-        callbacks=[early_stopping, model_checkpoint_callback]
-    )
+    # history = cnn_road.fit(
+    #     undersampled_training,
+    #     train_target,
+    #     batch_size=20,
+    #     epochs=100,
+    #     # We pass some validation for
+    #     # monitoring validation loss and metrics
+    #     # at the end of each epoch
+    #     validation_data=(val_data_oversampled, val_target_oversampled),
+    #     callbacks=[early_stopping, model_checkpoint_callback]
+    # )
     # get training images and validation images
+    return cnn_road
 
 
-#cnn_road_model()
+def cnn_road_model():
+    # we will under sample the data to get a better representation of the classes in the training dataset
+    training_data, train_target, val_data, val_target = get_training_images('data/train.csv')
+    undersampled_training, train_target = oversample_data(training_data, train_target)  # undersample training data
+    undersampled_training = undersampled_training.reshape(undersampled_training.shape[0], 100, 100, 1)
+    undersampled_training = undersampled_training / 255  # normalize so the model has an easier time learning
+    # over_sampled_training, oversampled_target = oversample_data(training_data, train_target)
+    # over_sampled_training = over_sampled_training.reshape(over_sampled_training.shape[0], 100, 100, 1)
+    # train_target = tf.keras.utils.to_categorical(oversampled_target)
+    # training_data = training_data.reshape(training_data.shape[0], 100, 100, 1)
+    train_target = tf.keras.utils.to_categorical(train_target)
+    val_data_oversampled, val_target_oversampled = oversample_data(val_data, val_target)  # oversample validation data
+    val_data_oversampled = val_data_oversampled.reshape(val_data_oversampled.shape[0], 100, 100, 1)
+    val_data_oversampled = val_data_oversampled / 255  # normalize between 0 and 1
+    val_target_oversampled = tf.keras.utils.to_categorical(val_target_oversampled)
+    val_data = val_data.reshape(val_data.shape[0], 100, 100, 1)
+    val_target = tf.keras.utils.to_categorical(val_target)
+
+    print("The amount of elements in x and the target should be exactly the same")
+    print("Training Data:")
+    print(undersampled_training.shape)
+    print(train_target)
+    print("Training Data:")
+    print(len(val_data_oversampled))
+    print(len(val_target_oversampled))
+
+    # convolutional model
+    # cnn_road = create_road_model(hypothesis)
+
+    tuner = kt.RandomSearch(
+        create_road_model,
+        objective='val_accuracy',
+        max_trials=5,
+        executions_per_trial=3,
+        directory='my_dir',
+        project_name='road_model'
+    )
+    #tuner.search_space_summary()
+    tuner.search(undersampled_training, train_target, epochs=20,
+                 validation_data=(val_data_oversampled, val_target_oversampled))
+
+
+cnn_road_model()
+
 
 def localization_and_classification():
     cnn_road = create_road_model()
@@ -263,7 +284,7 @@ def localization_and_classification():
         for point in localized_signs:
             pred_list.append(point[2].reshape(100, 100, 1))
     pred_list = np.array(pred_list)
-    predictions = cnn_road.predict(np.array(pred_list)) # make predictions
+    predictions = cnn_road.predict(np.array(pred_list))  # make predictions
     # do nothing if there are no signs
     if localized_signs != 0:
         pred_indexer = 0
@@ -350,8 +371,9 @@ def heuristic_localization(file_path):
     cv2.waitKey(0)
     return localized_cropped_images
 
-#heuristic_localization('data/test_images/road193.png')
-#heuristic_localization('data/train_images/road398.png')
+
+# heuristic_localization('data/test_images/road193.png')
+# heuristic_localization('data/train_images/road398.png')
 def bounding_box_given_with_label(image, coordinate_tuple_1, coordinate_tuple_2, label):
     # given a bounding box predicted by the net, the box will be drawn on the corresponding,
     # images where they can be visually checked for accuracy
@@ -383,6 +405,7 @@ def bounding_box(image_path_name, coordinate_tuple_1, coordinate_tuple_2):
     boxed_image = cv2.rectangle(image, fixed_tuple_coord_1, fixed_tuple_coord_2, color=color, thickness=1)
     cv2.imshow(image_path_name, boxed_image)  # show the image with the bounding box over the sign
     cv2.waitKey(0)  # wait for key press to be dismissed
+
 
 # bounding_box('data/train_images/road875.png', (186,74), (195,91))
 
@@ -489,7 +512,6 @@ def check_bounding_box(image_path, corresponding_target_path):
                             int((float(target_values[2]) + float(target_values[4]) / 2) * 448))
     bounding_box('data/obj/' + image_path, coordinate_top_left, coordinate_bot_right)
 
-
 # check_bounding_box('road624.png', 'road624.txt')
 
 # more_data_processing()
@@ -500,4 +522,4 @@ def check_bounding_box(image_path, corresponding_target_path):
 # mnist_model()
 # main()
 
-localization_and_classification()
+# localization_and_classification()
